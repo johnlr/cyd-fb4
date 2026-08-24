@@ -61,6 +61,9 @@ Game demos in `examples/`:
 | `fb4_serpent.py` | ![serpent](screenshots/fb4_serpent.png) |
 | `fb4_gp.py` | ![gp](screenshots/fb4_gp.png) |
 | `fb4_kessler.py` | ![kessler](screenshots/fb4_kessler.png) |
+| `fb4_dashboard1.py` | ![dashboard1](screenshots/fb4_dashboard1.png) |
+| `fb4_dashboard2.py` | ![dashboard2](screenshots/fb4_dashboard2.png) |
+| `fb4_weather.py` | ![weather](screenshots/fb4_weather.png) |
 
 ## How It Works
 
