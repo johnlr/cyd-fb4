@@ -69,6 +69,60 @@ Game demos in `examples/`:
 
 The driver allocates a `width * height / 2` byte buffer in GS4_HMSB format. When `show()` is called, a precomputed 256-entry lookup table (one byte pair to two RGB565 pixels) is used by an inline assembly loop that reads 64 bytes at a time and writes them directly to the SPI1 FIFO registers, bypassing the Python interpreter entirely.
 
+## Firmware
+
+fb4 requires a custom MicroPython v1.29.0 build with the inline Xtensa assembler enabled (`MICROPY_EMIT_INLINE_XTENSA=1`). The stock MicroPython binary from micropython.org does not include this feature.
+
+Pre-built firmware binaries are in `firmware/`.
+
+### Building with mpbuild
+
+[mpbuild](https://github.com/mattytrentini/mpbuild) builds MicroPython firmware in Docker containers -- no toolchains to install.
+
+```bash
+# Install mpbuild
+uv tool install mpbuild
+
+# Clone MicroPython (with submodules)
+git clone --recursive --branch v1.29.0 https://github.com/micropython/micropython.git
+cd micropython
+
+# Enable inline Xtensa assembler in board config
+# (add the following line after the existing #defines in ports/esp32/boards/ESP32_GENERIC/mpconfigboard.h):
+#   #define MICROPY_EMIT_INLINE_XTENSA (1)
+
+# Build
+mpbuild build ESP32_GENERIC
+
+# Merge into single firmware binary
+python -m esptool --chip esp32 merge_bin --flash_mode dio --flash_size 4MB --flash_freq 40m \
+  -o ports/esp32/build-ESP32_GENERIC/micropython_v1.29.0.bin \
+  0x1000 ports/esp32/build-ESP32_GENERIC/bootloader/bootloader.bin \
+  0x8000 ports/esp32/build-ESP32_GENERIC/partition_table/partition-table.bin \
+  0x10000 ports/esp32/build-ESP32_GENERIC/micropython.bin
+```
+
+### Flashing
+
+```bash
+# Erase flash (one-time)
+python -m esptool --chip esp32 erase_flash
+
+# Flash firmware
+python -m esptool --chip esp32 -b 460800 --before default_reset --after hard_reset \
+  write_flash --flash_mode dio --flash_size 4MB --flash_freq 40m \
+  0x0 firmware/micropython_v1.29.0.bin
+```
+
+### Deploying Files
+
+After flashing, copy `fb4.py` and any example to the device:
+
+```bash
+mpremote connect /dev/ttyUSB0 cp src/fb4.py :fb4.py
+mpremote connect /dev/ttyUSB0 cp examples/fb4_weather.py :main.py
+```
+
 ## License
 
 MIT
