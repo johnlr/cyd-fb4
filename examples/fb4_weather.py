@@ -1,10 +1,15 @@
 # fb4_weather.py - self-playing weather display demo using fb4
+# Connects to WiFi and shows real-time Melbourne weather from Open-Meteo.
 # Shows animated weather conditions, temperature, forecast panels, and
-# wind/humidity gauges with a cool blue sky palette. All data simulated.
+# wind/humidity gauges with a cool blue sky palette.
 import time
 import random
 import math
+import network
+import usocket
+import ujson
 import fb4
+from wifi_secret import SSID, PASS
 
 BG = 0
 RED = 1
@@ -18,71 +23,169 @@ LGRAY = 15
 
 fb = fb4.FB4()
 
-# sky blue palette
-fb.set_palette(0, 20, 30, 60)     # BG - dark sky
-fb.set_palette(1, 220, 80, 60)    # RED
-fb.set_palette(2, 80, 200, 80)    # GREEN
-fb.set_palette(3, 60, 120, 220)   # BLUE
-fb.set_palette(4, 240, 200, 60)   # YELLOW (sun)
-fb.set_palette(5, 100, 200, 240)  # CYAN
-fb.set_palette(8, 30, 35, 50)     # DGRAY
-fb.set_palette(9, 230, 235, 240)  # WHITE
-fb.set_palette(15, 100, 110, 130) # LGRAY
+# sky blue palette - high contrast
+fb.set_palette(0, 10, 12, 24)     # BG - near black
+fb.set_palette(1, 230, 70, 60)    # RED
+fb.set_palette(2, 80, 210, 100)   # GREEN
+fb.set_palette(3, 70, 130, 230)   # BLUE
+fb.set_palette(4, 250, 210, 50)   # YELLOW (sun)
+fb.set_palette(5, 80, 200, 240)   # CYAN
+fb.set_palette(8, 60, 65, 80)     # DGRAY (gauges/borders)
+fb.set_palette(9, 245, 245, 250)  # WHITE (primary text)
+fb.set_palette(15, 140, 145, 160) # LGRAY (secondary text/dividers)
+fb.set_palette(6, 55, 60, 80)     # 6 = cloud dark
+fb.set_palette(7, 160, 165, 180)  # 7 = cloud light
 
-fb.set_palette(6, 50, 50, 70)     # 6 = cloud dark
-fb.set_palette(7, 140, 150, 170)  # 7 = cloud light
-
-# --- weather states ---
-CONDITIONS = ["SUNNY", "PARTLY CLOUDY", "OVERCAST", "RAINY", "STORMY", "FOGGY", "SNOWY"]
 CLOUD = 6
 CLIGHT = 7
 
-frame = 0
-weather_idx = 0
-weather_timer = 0
-WEATHER_CYCLE = 300  # frames per weather change
+def wifi_connect():
+    fb.fill(BG)
+    fb.text("Connecting WiFi...", 80, 110, CYAN)
+    fb.show()
+    sta = network.WLAN(network.STA_IF)
+    sta.active(False)
+    time.sleep(1)
+    sta.active(True)
+    time.sleep(1)
+    sta.connect(SSID, PASS)
+    for i in range(30):
+        if sta.isconnected():
+            break
+        time.sleep(1)
+    if sta.isconnected():
+        ip = sta.ifconfig()[0]
+        fb.text("Connected!", 100, 110, GREEN)
+        fb.text(ip, 100, 125, WHITE)
+        fb.show()
+        time.sleep(1)
+        return True
+    else:
+        fb.text("WiFi FAILED", 100, 110, RED)
+        fb.show()
+        time.sleep(2)
+        return False
 
-# simulated data
+# --- HTTP client ---
+def http_get(host, path):
+    ai = usocket.getaddrinfo(host, 80)
+    addr = ai[0][4]
+    s = usocket.socket()
+    s.settimeout(15)
+    s.connect(addr)
+    s.write("GET {} HTTP/1.0\r\nHost: {}\r\n\r\n".format(path, host))
+    resp = b""
+    for i in range(40):
+        chunk = s.read(256)
+        if chunk:
+            resp += chunk
+        else:
+            break
+    s.close()
+    # strip HTTP headers
+    idx = resp.find(b"\r\n\r\n")
+    if idx >= 0:
+        resp = resp[idx + 4:]
+    return resp
+
+# --- WMO weather code mapping ---
+def wmo_to_cond(code):
+    if code == 0:
+        return "SUNNY"
+    elif code <= 3:
+        return "PARTLY CLOUDY"
+    elif code <= 49:
+        return "FOGGY"
+    elif code <= 59:
+        return "RAINY"
+    elif code <= 69:
+        return "RAINY"
+    elif code <= 79:
+        return "SNOWY"
+    elif code <= 82:
+        return "RAINY"
+    elif code <= 86:
+        return "SNOWY"
+    elif code <= 99:
+        return "STORMY"
+    return "OVERCAST"
+
+def wmo_to_desc(code):
+    if code == 0: return "Clear sky"
+    if code <= 3: return "Partly cloudy"
+    if code <= 49: return "Fog"
+    if code <= 59: return "Drizzle"
+    if code <= 69: return "Rain"
+    if code <= 79: return "Snow"
+    if code <= 82: return "Rain showers"
+    if code <= 86: return "Snow showers"
+    if code <= 99: return "Thunderstorm"
+    return "Cloudy"
+
+def fetch_weather():
+    path = ("/v1/forecast?latitude=-37.8136&longitude=144.9631"
+            "&current=temperature_2m,relative_humidity_2m,apparent_temperature,"
+            "weather_code,wind_speed_10m,wind_direction_10m,pressure_msl,"
+            "uv_index,visibility"
+            "&daily=weather_code,temperature_2m_max,temperature_2m_min"
+            "&timezone=Australia%2FMelbourne&forecast_days=5")
+    try:
+        raw = http_get("api.open-meteo.com", path)
+        data = ujson.loads(raw)
+        cur = data["current"]
+        daily = data["daily"]
+        result = {
+            "temp": cur["temperature_2m"],
+            "humidity": cur["relative_humidity_2m"],
+            "feels_like": cur["apparent_temperature"],
+            "cond": wmo_to_cond(cur["weather_code"]),
+            "desc": wmo_to_desc(cur["weather_code"]),
+            "wind_speed": cur["wind_speed_10m"],
+            "wind_dir": cur["wind_direction_10m"],
+            "pressure": cur["pressure_msl"],
+            "uv": cur.get("uv_index", 0),
+            "visibility": cur.get("visibility", 10000) / 1000,
+            "forecast": [],
+        }
+        for i in range(5):
+            fc = wmo_to_cond(daily["weather_code"][i])
+            result["forecast"].append((
+                fc,
+                int(daily["temperature_2m_max"][i]),
+                int(daily["temperature_2m_min"][i]),
+            ))
+        return result
+    except Exception as e:
+        fb.fill(BG)
+        fb.text("API ERROR", 110, 105, RED)
+        fb.text(str(e)[:30], 20, 120, WHITE)
+        fb.show()
+        time.sleep(3)
+        return None
+
+# --- weather display data ---
+cond = "SUNNY"
 temp = 22.0
 humidity = 55
-wind_dir = 0  # degrees
+wind_dir = 0
 wind_speed = 12
 pressure = 1013
 uv_idx = 5
 visibility = 10
-
-# forecast: (condition, hi, lo)
 forecast = [
     ("SUNNY", 28, 18),
-    ("PARTLY", 26, 17),
+    ("PARTLY CLOUDY", 26, 17),
     ("OVERCAST", 22, 15),
     ("RAINY", 19, 13),
     ("STORMY", 17, 12),
 ]
 
-# cloud positions for animation
-clouds = []
-for i in range(6):
-    clouds.append({
-        'x': random.randint(0, 320),
-        'y': random.randint(15, 55),
-        'w': random.randint(20, 40),
-        'speed': random.uniform(0.3, 1.0),
-    })
-
-# rain drops
-rain = []
-for i in range(30):
-    rain.append([random.randint(0, 320), random.randint(60, 240), random.randint(2, 4)])
-
-# snowflakes
-snow = []
-for i in range(40):
-    snow.append([random.randint(0, 320), random.randint(60, 240), random.randint(1, 2)])
-
-# lightning flash
+# animated particles
+rain = [[random.randint(0, 320), random.randint(60, 240), random.randint(2, 4)] for _ in range(30)]
+snow = [[random.randint(0, 320), random.randint(60, 240), random.randint(1, 2)] for _ in range(40)]
 lightning_timer = 0
 
+# --- drawing functions ---
 def draw_sun(cx, cy, r, col):
     fb.ellipse(cx, cy, r, r, col, 1)
     for i in range(8):
@@ -120,7 +223,6 @@ def draw_snow_flakes():
 def draw_fog():
     for i in range(8):
         y = 70 + i * 20
-        alpha_w = 60 + int(20 * math.sin(frame * 0.05 + i))
         fb.fill_rect(0, y, 320, 8, LGRAY)
         fb.fill_rect(0, y + 8, 320, 4, BG)
 
@@ -129,7 +231,6 @@ def draw_lightning():
     lightning_timer -= 1
     if lightning_timer <= 0 and random.random() < 0.02:
         lightning_timer = 3
-        x = random.randint(80, 240)
         fb.fill_rect(0, 0, 320, 240, WHITE)
         fb.show()
         time.sleep_ms(50)
@@ -143,12 +244,10 @@ def draw_lightning():
 
 def draw_wind_rose(cx, cy, r, direction, col):
     fb.ellipse(cx, cy, r, r, DGRAY, 0)
-    # N S E W labels
     fb.text("N", cx - 2, cy - r - 8, col)
     fb.text("S", cx - 2, cy + r + 2, col)
     fb.text("E", cx + r + 2, cy - 2, col)
     fb.text("W", cx - r - 8, cy - 2, col)
-    # needle
     rad = math.radians(direction - 90)
     nx = int(cx + (r - 3) * math.cos(rad))
     ny = int(cy + (r - 3) * math.sin(rad))
@@ -161,28 +260,28 @@ def draw_mini_bar(x, y, w, h, val, max_val, col):
     if fill_h > 0:
         fb.fill_rect(x + 1, y + h - fill_h, w - 2, fill_h, col)
 
-def draw_weather_icon(cx, cy, cond):
-    if cond == "SUNNY" or cond == "SUN":
+def draw_weather_icon(cx, cy, c):
+    if c == "SUNNY":
         draw_sun(cx, cy, 12, YELLOW)
-    elif cond in ("PARTLY CLOUDY", "PARTLY"):
+    elif c == "PARTLY CLOUDY":
         draw_sun(cx - 10, cy - 5, 8, YELLOW)
         draw_cloud(cx + 8, cy, 28, CLOUD, CLIGHT)
-    elif cond in ("OVERCAST", "CLOUDY"):
+    elif c == "OVERCAST":
         draw_cloud(cx - 5, cy - 3, 35, CLOUD, CLIGHT)
         draw_cloud(cx + 10, cy + 4, 25, CLIGHT, CLOUD)
-    elif cond in ("RAINY", "RAIN"):
+    elif c == "RAINY":
         draw_cloud(cx, cy - 8, 35, CLOUD, CLIGHT)
         for dx in (-8, 0, 8):
             fb.line(cx + dx, cy + 8, cx + dx - 2, cy + 16, CYAN)
-    elif cond in ("STORMY", "STORM"):
+    elif c == "STORMY":
         draw_cloud(cx, cy - 8, 35, CLOUD, CLIGHT)
         fb.line(cx, cy + 5, cx - 3, cy + 14, YELLOW)
         fb.line(cx - 3, cy + 14, cx + 2, cy + 14, YELLOW)
         fb.line(cx + 2, cy + 14, cx - 1, cy + 20, YELLOW)
-    elif cond in ("FOGGY", "FOG"):
+    elif c == "FOGGY":
         for dy in range(-8, 12, 5):
             fb.fill_rect(cx - 18, cy + dy, 36, 3, LGRAY)
-    elif cond in ("SNOWY", "SNOW"):
+    elif c == "SNOWY":
         draw_cloud(cx, cy - 8, 30, CLOUD, CLIGHT)
         for dx in (-8, -2, 4, 10):
             fb.fill_rect(cx + dx, cy + 8, 2, 2, WHITE)
@@ -192,55 +291,72 @@ def draw_weather_icon(cx, cy, cond):
 fb.fill(BG)
 fb.show()
 
+connected = wifi_connect()
+if connected:
+    w = fetch_weather()
+    if w:
+        cond = w["cond"]
+        temp = w["temp"]
+        humidity = w["humidity"]
+        wind_dir = w["wind_dir"]
+        wind_speed = w["wind_speed"]
+        pressure = int(w["pressure"])
+        uv_idx = int(w["uv"])
+        visibility = w["visibility"]
+        forecast = w["forecast"]
+
+frame = 0
+FETCH_INTERVAL = 600  # re-fetch every ~90 seconds
+fetch_timer = FETCH_INTERVAL - 10  # fetch quickly on first run
+
 while True:
-    weather_timer += 1
-    if weather_timer >= WEATHER_CYCLE:
-        weather_timer = 0
-        weather_idx = (weather_idx + 1) % len(CONDITIONS)
-
-    cond = CONDITIONS[weather_idx]
-
-    # slowly drift values
-    temp += random.uniform(-0.3, 0.3)
-    temp = max(-5, min(40, temp))
-    humidity = max(10, min(100, humidity + random.randint(-2, 2)))
-    wind_dir = (wind_dir + random.randint(-10, 10)) % 360
-    wind_speed = max(0, min(60, wind_speed + random.randint(-2, 2)))
-    pressure = max(980, min(1050, pressure + random.randint(-1, 1)))
+    # periodically re-fetch
+    fetch_timer += 1
+    if fetch_timer >= FETCH_INTERVAL and connected:
+        fetch_timer = 0
+        w = fetch_weather()
+        if w:
+            cond = w["cond"]
+            temp = w["temp"]
+            humidity = w["humidity"]
+            wind_dir = w["wind_dir"]
+            wind_speed = w["wind_speed"]
+            pressure = int(w["pressure"])
+            uv_idx = int(w["uv"])
+            visibility = w["visibility"]
+            forecast = w["forecast"]
 
     fb.fill(BG)
 
     # top bar
     fb.fill_rect(0, 0, 320, 13, 15)
-    fb.text("WEATHER STATION", 4, 2, BG)
+    fb.text("MELBOURNE", 4, 2, BG)
     fb.text(cond, 200, 2, BG)
 
     # main weather icon
     draw_weather_icon(80, 50, cond)
 
-    # temperature big
+    # temperature
     temp_str = "{:.1f}".format(temp)
     fb.text(temp_str, 170, 30, WHITE)
     fb.text("C", 170 + len(temp_str) * 8 + 2, 30, CYAN)
     fb.text("H:{}%".format(humidity), 170, 46, CYAN)
     fb.text("W:{}km/h".format(wind_speed), 170, 58, GREEN)
 
-    # animated rain/snow
+    # animated effects
     if cond in ("RAINY", "STORMY"):
         draw_rain_drops()
     elif cond == "SNOWY":
         draw_snow_flakes()
     elif cond == "FOGGY":
         draw_fog()
-
-    # lightning flash
     if cond == "STORMY":
         draw_lightning()
 
     # divider
     fb.fill_rect(0, 88, 320, 1, LGRAY)
 
-    # wind rose (compact)
+    # wind rose
     draw_wind_rose(35, 120, 20, wind_dir, CYAN)
     fb.text("{}km/h".format(wind_speed), 5, 153, WHITE)
 
@@ -250,32 +366,33 @@ while True:
     fb.text("{}%".format(humidity), 100, 120, WHITE)
 
     # pressure
-    fb.text("HPA", 130, 93, WHITE)
-    draw_mini_bar(130, 102, 16, 50, pressure - 980, 70, GREEN)
-    fb.text("{}".format(pressure), 150, 120, WHITE)
+    fb.text("HPA", 135, 93, WHITE)
+    draw_mini_bar(135, 102, 16, 50, pressure - 980, 70, GREEN)
+    fb.text("{}".format(pressure), 155, 120, WHITE)
 
     # UV index
-    fb.text("UV", 180, 93, WHITE)
+    fb.text("UV", 190, 93, WHITE)
     uv_col = GREEN if uv_idx <= 5 else (YELLOW if uv_idx <= 7 else RED)
-    draw_mini_bar(180, 102, 16, 50, uv_idx, 11, uv_col)
-    fb.text(str(uv_idx), 200, 120, uv_col)
+    draw_mini_bar(190, 102, 16, 50, uv_idx, 11, uv_col)
+    fb.text(str(uv_idx), 210, 120, uv_col)
 
     # visibility
-    fb.text("VIS", 225, 93, WHITE)
-    draw_mini_bar(225, 102, 16, 50, visibility, 20, LGRAY)
-    fb.text("{}km".format(visibility), 245, 120, WHITE)
+    fb.text("VIS", 245, 93, WHITE)
+    draw_mini_bar(245, 102, 16, 50, visibility, 20, LGRAY)
+    fb.text("{}km".format(int(visibility)), 265, 120, WHITE)
 
     # divider
     fb.fill_rect(0, 168, 320, 1, LGRAY)
 
-    # forecast strip - 5 days with inline icons
+    # forecast strip
     fb.text("5-DAY FORECAST", 104, 176, WHITE)
-    fw = 62
+    iw = 56
+    gap = (320 - 5 * iw) // 4
     for i, (fcond, fhi, flo) in enumerate(forecast):
-        fx = 4 + i * fw
+        fx = i * (iw + gap)
         fy = 208
-        draw_weather_icon(fx + 14, fy, fcond)
-        fb.text("{}/{}".format(fhi, flo), fx + 2, fy + 24, WHITE)
+        draw_weather_icon(fx + iw // 2, fy, fcond)
+        fb.text("{}/{}".format(fhi, flo), fx + 4, fy + 24, WHITE)
 
     fb.show()
     time.sleep_ms(150)
