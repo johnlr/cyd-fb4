@@ -63,7 +63,7 @@ Game demos in `examples/`:
 | `fb4_kessler.py` | ![kessler](screenshots/fb4_kessler.png) |
 | `fb4_dashboard1.py` | ![dashboard1](screenshots/fb4_dashboard1.png) |
 | `fb4_dashboard2.py` | ![dashboard2](screenshots/fb4_dashboard2.png) |
-| `fb4_weather.py` | ![weather](screenshots/fb4_weather.png) |
+| `fb4_weather.py` | ![weather](screenshots/fb4_weather_rain.gif) |
 
 ## How It Works
 
