@@ -56,13 +56,13 @@ Game demos in `examples/`:
 |------|------------|
 | `fb4_pillman.py` | ![pillman](screenshots/fb4_pillman.gif) |
 | `fb4_rock_runner.py` | ![rock_runner](screenshots/fb4_rock_runner.gif) |
-| `fb4_crater_crawler.py` | ![crater_crawler](screenshots/fb4_crater_crawler.png) |
+| `fb4_crater_crawler.py` | ![crater_crawler](screenshots/fb4_crater_crawler.gif) |
 | `fb4_space_intruders.py` | ![space_intruders](screenshots/fb4_space_intruders.gif) |
 | `fb4_serpent.py` | ![serpent](screenshots/fb4_serpent.gif) |
 | `fb4_gp.py` | ![gp](screenshots/fb4_gp.gif) |
 | `fb4_kessler.py` | ![kessler](screenshots/fb4_kessler.gif) |
-| `fb4_dashboard1.py` | ![dashboard1](screenshots/fb4_dashboard1.png) |
-| `fb4_dashboard2.py` | ![dashboard2](screenshots/fb4_dashboard2.png) |
+| `fb4_dashboard1.py` | ![dashboard1](screenshots/fb4_dashboard1.gif) |
+| `fb4_dashboard2.py` | ![dashboard2](screenshots/fb4_dashboard2.gif) |
 | `fb4_weather.py` | ![weather](screenshots/fb4_weather_rain.gif) |
 
 ## How It Works
