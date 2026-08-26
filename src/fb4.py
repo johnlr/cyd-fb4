@@ -29,57 +29,88 @@ def color565(r, g, b):
     return ((r & 0xf8) << 8) | ((g & 0xfc) << 3) | (b >> 3)
 
 
+def _pack32(buf, off, val):
+    buf[off] = val & 0xff
+    buf[off + 1] = (val >> 8) & 0xff
+    buf[off + 2] = (val >> 16) & 0xff
+    buf[off + 3] = (val >> 24) & 0xff
+
+
 # Push the whole framebuffer to the display via the SPI hardware FIFO.
-# a2 = src (4bpp buffer), a3 = fifo_lut (256 x 4-byte packed words),
-# a4 = SPI base address, a5 = number of 64-byte batches (2400 = 153600/64).
-# NOTE: only backwards bnez loops are used (forward branches are broken in
-# MicroPython's inline xtensa emitter); scratch regs limited to a6-a10.
+# Param block (20 bytes): [src, lut, spi_base, staging, nbatches]
+# Staging approach: convert nibbles to RGB565 in DRAM, wait for SPI idle,
+# burst-copy staging->FIFO, trigger.
+# Register map:
+#   a2  = batch counter / param pointer (reused)
+#   a3  = src pointer (4bpp nibble stream, consumed forward)
+#   a4  = fifo_lut base (256 x 4-byte CLUT words)
+#   a5  = spi base address
+#   a6  = staging buffer address (64 bytes, DRAM)
+#   a7  = FIFO W0 base (spi + 0x80)
+#   a8  = USR trigger bit (0x040000)
+#   a9  = staging/copy pointer (reset each loop)
+#   a10 = FIFO write pointer (reset each loop)
+#   a11 = constant 16 (batch size)
+#   a14 = loop counter
+#   a15 = scratch
 @micropython.asm_xtensa
-def _show_fifo(a2, a3, a4, a5):
-    movi(a6, 511)
-    s32i(a6, a4, 0x28)  # DLEN = 511 bits (64 bytes per batch)
+def _show_fifo(a2):
 
-    label(batch_loop)
+    l32i(a3, a2, 0)          # a3 = src
+    l32i(a4, a2, 4)          # a4 = lut
+    l32i(a5, a2, 8)          # a5 = spi base
+    l32i(a6, a2, 12)         # a6 = staging ptr
+    l32i(a2, a2, 16)         # a2 = nbatches (overwrites param ptr)
+    movi(a8, 0x040000)       # SPI_USR bit in cmd reg
+    movi(a11, 16)            # 16 words per batch
+    movi(a15, 511)
+    s32i(a15, a5, 0x28)      # DLEN = 511 bits (64 bytes)
+    movi(a7, 0x80)
+    add(a7, a5, a7)          # a7 = spi + 0x80 = W0 FIFO
 
-    # 1. Wait for SPI idle
-    label(wait_spi)
-    l32i(a6, a4, 0x00)
-    movi(a7, 0x40000)
-    and_(a6, a6, a7)
-    bnez(a6, wait_spi)
+    # -- outer loop: 2400 batches ------------------------------------
+    label(batch)                                       # batch --+
+                                                       #        |
+    # -- inner loop 1: convert 16 nibbles -> staging -----
+    mov(a9, a6)                                        # staging ptr
+    mov(a14, a11)                                      # counter = 16
+    label(cv)                                          # cv -----+
+    l8ui(a15, a3, 0)          # read nibble byte       # |        |
+    addi(a3, a3, 1)           # advance src            # |        |
+    addx4(a15, a15, a4)       # byte * 4 + lut base    # |        |
+    l32i(a15, a15, 0)         # load 2xRGB565 word     # |        |
+    s32i(a15, a9, 0)          # store to staging       # |        |
+    addi(a9, a9, 4)           # advance staging ptr    # |        |
+    addi(a14, a14, -1)                                 # |        |
+    bnez(a14, cv)                                      # ---------+
 
-    # 2. Feed 16 words (64 bytes) from precomputed LUT into SPI_W0..W15
-    movi(a6, 0)        # FIFO offset counter
-    movi(a7, 16)       # 16 words per batch
+    # -- poll: wait for previous SPI transfer to finish --------
+    label(wi)                                          # wi -----+
+    l32i(a15, a5, 0)           # read SPI_CMD          # |        |
+    bbsi(a15, 18, wi)          # while USR bit set     # ---------+
 
-    label(conv_loop)
-    l8ui(a8, a2, 0)    # read 1 input byte (2 pixels)
-    addi(a2, a2, 1)    # src++
+    # -- burst-copy 16 words staging -> FIFO ---------------------
+    mov(a9, a6)                                        # staging base
+    mov(a10, a7)                                       # FIFO W0 base
+    mov(a14, a11)                                      # counter = 16
+    label(cp)                                          # cp -----+
+    l32i(a15, a9, 0)           # load from staging     # |        |
+    s32i(a15, a10, 0)          # store to FIFO         # |        |
+    addi(a10, a10, 4)          # advance FIFO ptr      # |        |
+    addi(a9, a9, 4)            # advance staging ptr   # |        |
+    addi(a14, a14, -1)                                 # |        |
+    bnez(a14, cp)                                      # ---------+
 
-    slli(a9, a8, 2)    # byte * 4 = LUT index
-    add(a9, a9, a3)
-    l32i(a9, a9, 0)    # load pre-packed 32-bit word (2 pixels RGB565)
+    # trigger the 512-bit transfer
+    s32i(a8, a5, 0)            # set SPI_USR
 
-    add(a8, a4, a6)
-    s32i(a9, a8, 0x80) # store into SPI FIFO register W0..W15
+    addi(a2, a2, -1)           # decrement batch counter
+    bnez(a2, batch)            # ----------------------- # +------+
 
-    addi(a6, a6, 4)
-    addi(a7, a7, -1)
-    bnez(a7, conv_loop)
-
-    # 3. Trigger transfer
-    movi(a6, 0x040000)
-    s32i(a6, a4, 0x00)
-
-    addi(a5, a5, -1)
-    bnez(a5, batch_loop)
-
-    # Final wait for last batch to drain
-    label(wait_final)
-    l32i(a6, a4, 0x00)
-    movi(a7, 0x040000)
-    and_(a6, a6, a7)
-    bnez(a6, wait_final)
+    # drain the final transfer
+    label(wf)                                          # wf -----+
+    l32i(a15, a5, 0)           # read SPI_CMD          # |        |
+    bbsi(a15, 18, wf)          # while USR bit set     # ---------+
 
 
 class FB4(framebuf.FrameBuffer):
@@ -110,6 +141,10 @@ class FB4(framebuf.FrameBuffer):
         self.clut = bytearray(32)
         # Precomputed LUT: input byte -> 4-byte word with 2 pre-swapped pixels
         self.fifo_lut = bytearray(256 * 4)
+        # 64-byte staging buffer for burst copy to SPI FIFO
+        self._staging = bytearray(64)
+        # Parameter block for asm: [src, lut, spi, staging, nbatches]
+        self._params = bytearray(20)
 
         # Default 16-color palette
         palette = (
@@ -133,11 +168,17 @@ class FB4(framebuf.FrameBuffer):
         for i, (r, g, b) in enumerate(palette):
             self.set_palette(i, r, g, b)
 
-        self._src = uctypes.addressof(self.buf)
-        self._lut = uctypes.addressof(self.fifo_lut)
-        self._batches = (width * height * 2) // 64
+        # Pack param block
+        p = self._params
+        _pack32(p, 0, uctypes.addressof(self.buf))
+        _pack32(p, 4, uctypes.addressof(self.fifo_lut))
+        _pack32(p, 8, _SPI_BASE)
+        _pack32(p, 12, uctypes.addressof(self._staging))
+        _pack32(p, 16, (width * height * 2) // 64)
+        self._pa = uctypes.addressof(self._params)
 
         self.init_display()
+        self._set_window(0, 0, self.width - 1, self.height - 1)
 
     def set_palette(self, i, r, g, b):
         """Set palette entry i (0-15) to the given RGB and rebuild the LUT."""
@@ -176,7 +217,7 @@ class FB4(framebuf.FrameBuffer):
 
     def _set_window(self, x0, y0, x1, y1):
         self._cmd(CASET, [x0 >> 8, x0 & 0xff, x1 >> 8, x1 & 0xff])
-        self._cmd(RASET, [y0 >> 8, y0 & 0xff, y1 >> 8, y1 & 0xff])
+        self._cmd(RASET, [y0 >> 8, y0 & 0xff, x1 >> 8, y1 & 0xff])
         self._cmd(RAMWR)
 
     def init_display(self):
@@ -191,10 +232,8 @@ class FB4(framebuf.FrameBuffer):
         self._cmd(DISPON); time.sleep_ms(50)
 
     def show(self):
-        """Push the whole framebuffer to the display (~30 ms)."""
-        self._set_window(0, 0, self.width - 1, self.height - 1)
+        """Push the whole framebuffer to the display."""
         self.dc.value(1)
         self.cs.value(0)
-        self.spi.write(bytearray(1))
-        _show_fifo(self._src, self._lut, _SPI_BASE, self._batches)
+        _show_fifo(self._pa)
         self.cs.value(1)
