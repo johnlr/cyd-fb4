@@ -54,6 +54,7 @@ Game demos in `examples/`:
 
 | Game | Screenshot |
 |------|------------|
+| `fb4_sokoban.py` | ![sokoban](screenshots/fb4_sokoban.png) |
 | `fb4_pillman.py` | ![pillman](screenshots/fb4_pillman.gif) |
 | `fb4_rock_runner.py` | ![rock_runner](screenshots/fb4_rock_runner.gif) |
 | `fb4_crater_crawler.py` | ![crater_crawler](screenshots/fb4_crater_crawler.gif) |
